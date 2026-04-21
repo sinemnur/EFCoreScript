@@ -1,0 +1,627 @@
+#!/usr/bin/python3
+import sys
+import subprocess
+import os
+
+uzunluk = len(sys.argv)
+
+if uzunluk < 2:
+    print("Doğru kullanım : dwc-ef <make|install|migrate|diffs>")
+    sys.exit(1)
+
+command = sys.argv[1]
+
+match command:
+
+    case "install":
+        print("EF Core 9 paketleri kuruluyor...")
+
+        packages = [
+            "Microsoft.EntityFrameworkCore",
+            "Microsoft.EntityFrameworkCore.SqlServer",
+            "Microsoft.EntityFrameworkCore.Tools"
+        ]
+
+        for pkg in packages:
+            subprocess.run([
+                "dotnet", "add", "package", pkg,
+                "--version", "9.0.0"
+            ])
+
+        print("Kurulum tamamlandı")
+
+    case "make":
+        if uzunluk < 4:
+            print("Eksik parametre: modül adı gir")
+
+        elif uzunluk == 4:
+            name = sys.argv[3]
+
+            match sys.argv[2]:
+                case "context":
+
+                    def get_project_name(): # dosyanın adını alıyoruz
+                        for file in os.listdir():
+                            if file.endswith(".csproj"):
+                                return file.replace(".csproj", "")
+                        return None
+
+                    project_name = get_project_name()
+                    filename=f"Data/{name}.cs"
+
+                    os.makedirs("Data",exist_ok=True)
+
+                    content = f"""using Microsoft.EntityFrameworkCore;
+
+                    namespace {project_name}.Data;
+
+                    public class {name} : DbContext
+                    {{
+                        public {name}(DbContextOptions<{name}> options)
+                            : base(options)
+                        {{
+                        }}
+
+                        // DbSet'ler buraya eklenecek
+                    }}
+                    """
+
+                    with open(filename,"w") as dosya:
+                        dosya.write(content)
+                    print("oluşturuldu")
+
+
+
+                    # ----------------------------
+                    # Program.cs güncelle
+                    # ----------------------------
+
+                    program_path = "Program.cs"
+
+                    if not os.path.exists(program_path):
+                        print("⚠️ Program.cs bulunamadı")
+                        sys.exit(0)
+
+                    with open(program_path, "r") as f:
+                        program_content = f.read() # program cs string olarak bende-metin içinde değişiklik yapabilirim anlamına geliyor-yani usingleri ekleyebiliyorum
+
+                    # using ekle
+                    if f"using {project_name}.Data;" not in program_content:
+                        program_content = f"using {project_name}.Data;\n" + program_content
+
+
+
+                    # zaten ekli mi?
+                    if f"AddDbContext<{name}>" in program_content:
+                        print("⚠️ DbContext zaten ekli")
+                    else:
+                        insert_code = f"""builder.Services.AddDbContext<{name}>(options =>
+                        options.UseSqlServer("Server=localhost;Database=TestDb;Trusted_Connection=True;TrustServerCertificate=True;"));
+                    """
+
+                        program_content = program_content.replace(
+                            "var app = builder.Build();",
+                            insert_code + "\nvar app = builder.Build();"
+                        )
+
+                        print("🚀 Program.cs güncellendi")
+
+                    with open(program_path, "w") as f:
+                        f.write(program_content)
+
+                case "repository":
+
+
+                    # -----------------------
+                    # PROJECT NAME
+                    # -----------------------
+                    def get_project_name():
+                        for file in os.listdir():
+                            if file.endswith(".csproj"):
+                                return file.replace(".csproj", "")
+                        return None
+
+
+                    project_name = get_project_name()
+
+                    if not project_name:
+                        print("❌ Proje adı bulunamadı")
+                        sys.exit(1)
+
+                    # -----------------------
+                    # ENTITY KONTROL
+                    # -----------------------
+                    entities_path = "Data/Entities" # düzenlenecek
+
+                    if not os.path.exists(entities_path):
+                        print("❌ Entities klasörü bulunamadı")
+                        sys.exit(1)
+
+                    existing_entities = [
+                        file.replace(".cs", "")
+                        for file in os.listdir(entities_path)
+                        if file.endswith(".cs")
+                    ]
+
+                    if name not in existing_entities:
+                        print(f"❌ '{name}' entity bulunamadı")
+                        print("📦 Mevcut entityler:")
+                        for e in existing_entities:
+                            print(f" - {e}")
+                        sys.exit(1)
+
+                    # -----------------------
+                    # KLASÖR OLUŞTUR
+                    # -----------------------
+                    repo_path = "Data/Repositories" # düzenlenecek
+                    os.makedirs(repo_path, exist_ok=True)
+
+                    # -----------------------
+                    # DOSYA YOLLARI
+                    # -----------------------
+                    interface_filename = f"{repo_path}/I{name}Repository.cs"
+                    repo_filename = f"{repo_path}/{name}Repository.cs"
+
+                    dbset_name = f"{name}s"  # şimdilik basit çoğul
+
+                    # -----------------------
+                    # INTERFACE CONTENT
+                    # -----------------------
+                    interface_content = f"""using {project_name}.Data.Entities;
+
+                namespace {project_name}.Data.Repositories;
+
+                public interface I{name}Repository
+                {{
+                    Task<List<{name}>> GetAllAsync();
+                    Task<{name}?> GetByIdAsync(int id);
+                    Task AddAsync({name} entity);
+                    Task UpdateAsync({name} entity);
+                    Task DeleteAsync(int id);
+                }}
+                """
+
+                    # -----------------------
+                    # REPOSITORY CONTENT
+                    # -----------------------
+                    repo_content = f"""using Microsoft.EntityFrameworkCore;
+                using {project_name}.Data.Entities;
+
+                namespace {project_name}.Data.Repositories;
+
+                public class {name}Repository : I{name}Repository
+                {{
+                    private readonly AppDbContext _context;
+
+                    public {name}Repository(AppDbContext context)
+                    {{
+                        _context = context;
+                    }}
+
+                    public async Task<List<{name}>> GetAllAsync()
+                    {{
+                        return await _context.{dbset_name}.ToListAsync();
+                    }}
+
+                    public async Task<{name}?> GetByIdAsync(int id)
+                    {{
+                        return await _context.{dbset_name}.FindAsync(id);
+                    }}
+
+                    public async Task AddAsync({name} entity)
+                    {{
+                        await _context.{dbset_name}.AddAsync(entity);
+                        await _context.SaveChangesAsync();
+                    }}
+
+                    public async Task UpdateAsync({name} entity)
+                    {{
+                        _context.{dbset_name}.Update(entity);
+                        await _context.SaveChangesAsync();
+                    }}
+
+                    public async Task DeleteAsync(int id)
+                    {{
+                        var entity = await _context.{dbset_name}.FindAsync(id);
+                        if (entity != null)
+                        {{
+                            _context.{dbset_name}.Remove(entity);
+                            await _context.SaveChangesAsync();
+                        }}
+                    }}
+                }}
+                """
+
+                    # -----------------------
+                    # DOSYA OLUŞTUR
+                    # -----------------------
+                    if os.path.exists(interface_filename):
+                        print("⚠️ Interface zaten var")
+                    else:
+                        with open(interface_filename, "w") as f:
+                            f.write(interface_content)
+                        print("✅ Interface oluşturuldu")
+
+                    if os.path.exists(repo_filename):
+                        print("⚠️ Repository zaten var")
+                    else:
+                        with open(repo_filename, "w") as f:
+                            f.write(repo_content)
+                        print("🚀 Repository oluşturuldu")
+
+                case "entity":
+
+                    def get_project_name():
+                        for file in os.listdir():
+                            if file.endswith(".csproj"):
+                                return file.replace(".csproj", "")
+                        return None
+
+
+                    project_name = get_project_name()
+
+                    if not project_name:
+                        print("❌ Proje adı bulunamadı")
+                        sys.exit(1)
+
+                    # -----------------------
+                    # ENTITY OLUŞTUR
+                    # -----------------------
+
+                    if name.endswith("s"):
+                        print("⚠️ Entity isimleri tekil olmalı (User, Product vs)")
+                        # return gerekebilir
+
+                    os.makedirs("Data/Entities", exist_ok=True)
+
+                    filename = f"Data/Entities/{name}.cs"
+
+                    content = f"""namespace {project_name}.Data.Entities;
+
+                public class {name}
+                {{
+                    public int Id {{ get; set; }}
+                }}
+                """
+
+                    if os.path.exists(filename):
+                        print("⚠️ Entity zaten var")
+                    else:
+                        with open(filename, "w") as f:
+                            f.write(content)
+                        print("✅ Entity oluşturuldu")
+
+                    # -----------------------
+                    # DbContext güncelle
+                    # -----------------------
+
+                    context_path = "Data/AppDbContext.cs" # düzeltilecek
+
+                    if not os.path.exists(context_path):
+                        print("❌ AppDbContext bulunamadı")
+                        sys.exit(1)
+
+                    with open(context_path, "r") as f:
+                        context_content = f.read() # string olarak elimizde
+
+                    # using ekle
+                    using_line = f"using {project_name}.Data.Entities;"
+
+                    if using_line not in context_content:
+                        context_content = using_line + "\n" + context_content
+
+                    # DbSet zaten var mı?
+                    if f"DbSet<{name}>" in context_content:
+                        print("⚠️ DbSet zaten ekli")
+                    else:
+                        dbset_line = f"    public DbSet<{name}> {name}s {{ get; set; }}\n"
+
+                        if "// DbSetler gelecek" in context_content:
+                            context_content = context_content.replace(
+                                "// DbSetler gelecek",
+                                dbset_line + "    // DbSetler gelecek"
+                            )
+                        else:
+                            # fallback → class sonuna ekle
+                            context_content = context_content.replace(
+                                "}",
+                                dbset_line + "}"
+                            )
+
+                        with open(context_path, "w") as f:
+                            f.write(context_content)
+
+                        print("🚀 DbContext güncellendi")
+                case "controller":
+                    print("")
+
+                case "migration":
+
+                    import os
+                    import sys
+                    import subprocess
+
+                    if len(sys.argv) < 4:
+                        print("❌ Migration adı gir (örn: dwc-ef make migration InitialCreate)")
+                        sys.exit(1)
+
+                    name = sys.argv[3]
+
+                    # Data klasörü var mı?
+                    if not os.path.exists("Data"):
+                        print("❌ Data klasörü bulunamadı")
+                        sys.exit(1)
+
+                    # DbContext var mı kontrol et
+                    context_found = False
+
+                    for root, dirs, files in os.walk("Data"):
+                        for file in files:
+                            if file.endswith(".cs"):
+                                full_path = os.path.join(root, file)
+
+                                with open(full_path, "r", encoding="utf-8") as f:
+                                    if "DbContext" in f.read():
+                                        context_found = True
+                                        break
+
+                        if context_found:
+                            break
+
+                    if not context_found:
+                        print("❌ DbContext bulunamadı (önce context oluştur)")
+                        sys.exit(1)
+
+                    # dotnet ef çalışıyor mu?
+                    try:
+                        subprocess.run(["dotnet", "ef"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except:
+                        print("❌ dotnet-ef yüklü değil → dotnet tool install --global dotnet-ef")
+                        sys.exit(1)
+
+                    # migration oluştur
+                    try:
+                        subprocess.run(
+                            ["dotnet", "ef", "migrations", "add", name],
+                            check=True
+                        )
+                        print(f"✅ Migration oluşturuldu: {name}")
+                    except Exception as e:
+                        print("❌ Migration oluşturulamadı")
+                        print(e)
+
+                case "model":
+
+                    import os
+                    import sys
+
+
+                    # proje adı bul
+                    def get_project_name():
+                        for file in os.listdir():
+                            if file.endswith(".csproj"):
+                                return file.replace(".csproj", "")
+                        return None
+
+
+                    project_name = get_project_name()
+
+                    if not project_name:
+                        print("❌ Proje adı bulunamadı")
+                        sys.exit(1)
+
+                    # parametre kontrol
+                    if len(sys.argv) < 3:
+                        print("❌ Model adı girilmedi (örn: dwc-ef make model User)")
+                        sys.exit(1)
+
+                    name = sys.argv[3]
+
+                    # VALIDATION 🔥
+
+                    # büyük harf kontrolü
+                    if not name[0].isupper():
+                        print("❌ Model ismi büyük harfle başlamalı (User, Product vs)")
+                        sys.exit(1)
+
+                    # çoğul kontrol
+                    if name.endswith("s"):
+                        print("⚠️ Model ismi tekil olmalı (User, Product vs)")
+                        sys.exit(1)
+
+                    # Dto yazılmış mı kontrol
+                    if name.lower().endswith("dto"):
+                        print("❌ Sadece entity adı gir (User yaz, UserDto değil)")
+                        sys.exit(1)
+
+                    # Entity var mı kontrol
+                    entity_path = f"Data/Entities/{name}.cs"
+                    if not os.path.exists(entity_path):
+                        print(f"❌ {name} entity bulunamadı (önce entity oluştur)") # olan entity gösterilsin
+                        sys.exit(1)
+
+                    # klasör oluştur
+                    models_path = "Data/Models"  # şimdilik sabit
+                    os.makedirs(models_path, exist_ok=True)
+
+                    filename = f"{models_path}/{name}Dto.cs"
+
+                    # içerik
+                    content = f"""namespace {project_name}.Data.Models;
+
+                public class {name}Dto
+                {{
+                    public int Id {{ get; set; }}
+                }}
+                """
+
+                    # dosya kontrol
+                    if os.path.exists(filename):
+                        print("⚠️ Model zaten var")
+                    else:
+                        with open(filename, "w") as f:
+                            f.write(content)
+
+                        print(f"✅ {name}Dto oluşturuldu")
+
+        else:
+            name = sys.argv[3]
+            yol = sys.argv[4]
+
+            match sys.argv[2]:
+                case "context":
+                    print(f"{name} isimli context {yol} yolu ile kuruldu")
+                case "entity":
+                    print(f"{name} isimli entity {yol} yolu ile kuruldu")
+
+                case "migration":
+                    if len(sys.argv) < 4:
+                        print("❌ Migration adı gir (örn: dwc-ef make migration InitialCreate)")
+                        sys.exit(1)
+
+                    name = sys.argv[3]
+
+                    # Data klasörü var mı?
+                    if not os.path.exists("Data"):
+                        print("❌ Data klasörü bulunamadı")
+                        sys.exit(1)
+
+                    # DbContext var mı kontrol et
+                    context_found = False
+
+                    for root, dirs, files in os.walk("Data"):
+                        for file in files:
+                            if file.endswith(".cs"):
+                                full_path = os.path.join(root, file)
+
+                                with open(full_path, "r", encoding="utf-8") as f:
+                                    if "DbContext" in f.read():
+                                        context_found = True
+                                        break
+
+                        if context_found:
+                            break
+
+                    if not context_found:
+                        print("❌ DbContext bulunamadı (önce context oluştur)")
+                        sys.exit(1)
+
+                    # dotnet ef çalışıyor mu?
+                    try:
+                        subprocess.run(["dotnet", "ef"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except:
+                        print("❌ dotnet-ef yüklü değil → dotnet tool install --global dotnet-ef")
+                        sys.exit(1)
+
+                    # migration oluştur
+                    try:
+                        subprocess.run(
+                            ["dotnet", "ef", "migrations", "add", name],
+                            check=True
+                        )
+                        print(f"✅ Migration oluşturuldu: {name}")
+                    except Exception as e:
+                        print("❌ Migration oluşturulamadı")
+                        print(e)
+
+                case "repository":
+                    print(f"{name} isimli repository {yol} yolu ile kuruldu")
+                case "model":
+                    print(f"{name} isimli model {yol} yolu ile kuruldu")
+                case _:
+                    print("lütfen modül adını kontrol edin.")
+
+    case "diffs":
+        print("diffs işlemi")
+
+    case "migrate": # oluşturulmuş migration dosyasını database'e uygular
+        print("migrate")
+
+
+
+    case "rollback":
+        print("rollback işlemi")
+
+
+    case "sync":
+
+        if sys.argv[2] == "context":
+
+            import re
+
+            entities_path = "Data/Entities"
+            data_path = "Data"
+
+            # entityleri toplama(klasördeki cs dosyaları yani veritabanı tabloları)
+            entities = [
+                file.replace(".cs", "")
+                for file in os.listdir(entities_path)
+                if file.endswith(".cs")
+            ]
+
+            # DbSet üretme
+            dbsets = ""
+            for e in entities:
+                dbsets += f"    public DbSet<{e}> {e}s {{ get; set; }}\n"
+
+            # Context dosyası bulma
+            context_file = None
+
+            for file in os.listdir(data_path):
+                if file.endswith(".cs"):
+                    full_path = os.path.join(data_path, file)
+
+                    with open(full_path, "r") as f: # Data klsöründe DbContext geçen dosyayı bulur
+                        if "DbContext" in f.read():
+                            context_file = full_path
+                            break
+
+            if not context_file:
+                print("❌ DbContext bulunamadı")
+                sys.exit(1)
+
+            # Context adını bulma
+            with open(context_file, "r") as f:
+                content = f.read()
+
+            match = re.search(r'class\s+(\w+)\s*:\s*DbContext', content) # buradaki regex ile dosyanın ismini yakalıyoruz
+
+            context_name = match.group(1)
+
+
+            # Proje adı
+            def get_project_name():
+                for file in os.listdir():
+                    if file.endswith(".csproj"):
+                        return file.replace(".csproj", "")
+                return None
+
+
+            project_name = get_project_name()
+
+            # Yeni context
+            new_content = f"""using Microsoft.EntityFrameworkCore;
+    using {project_name}.Data.Entities;
+
+    namespace {project_name}.Data;
+
+    public class {context_name} : DbContext
+    {{
+        public {context_name}(DbContextOptions<{context_name}> options)
+            : base(options)
+        {{
+        }}
+
+    {dbsets}
+    }}
+    """
+
+            with open(context_file, "w") as f:
+                f.write(new_content)
+
+            print(f"🚀 {context_name} güncellendi")
+    case _:
+        print("Bilinmeyen komut")
+
+
+
